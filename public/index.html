@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chat con Ollama</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="font-sans m-0 p-0 bg-gray-100 flex justify-center items-center min-h-screen">
+    <div class="chat-container bg-white rounded-lg shadow-lg w-11/12 max-w-md flex flex-col overflow-hidden">
+        <div class="chat-messages flex-grow p-5 overflow-y-auto max-h-[70vh] flex flex-col" id="chat-messages">
+            <div class="message bot self-start bg-gray-200 text-gray-800 mb-4 p-3 rounded-xl max-w-[80%] break-words rounded-bl-sm flex items-start">
+                <span class="icon mr-2 text-xl">🤖</span>
+                <span class="message-text">Benvenuto! Chiedimi qualcosa.</span>
+            </div>
+        </div>
+        <div class="chat-input flex p-4 border-t border-gray-200 bg-gray-50">
+            <input type="text" id="user-input" placeholder="Scrivi il tuo messaggio..." class="flex-grow p-3 border border-gray-300 rounded-full outline-none focus:ring-2 focus:ring-blue-500">
+            <button id="send-button" class="ml-3 bg-green-600 text-white border-none rounded-full px-5 py-2 cursor-pointer transition duration-300 ease-in-out hover:bg-green-700">Invia</button>
+        </div>
+    </div>
+
+    <script>
+        const chatMessages = document.getElementById('chat-messages');
+        const userInput = document.getElementById('user-input');
+        const sendButton = document.getElementById('send-button');
+
+        let conversation = []; // Array per mantenere la storia della conversazione
+        let thinkingInterval; // Variabile per tenere traccia dell'intervallo di animazione
+        let currentBotMessageElement; // Per tenere traccia del messaggio del bot che si sta componendo
+
+        // Funzione per aggiungere un messaggio alla chat
+        function addMessage(text, sender) {
+            const messageDiv = document.createElement('div');
+            messageDiv.classList.add('message', 'mb-4', 'p-3', 'rounded-xl', 'max-w-[80%]', 'break-words', 'flex', 'items-start');
+
+            const iconSpan = document.createElement('span');
+            iconSpan.classList.add('icon', 'mr-2', 'text-xl');
+
+            const messageTextSpan = document.createElement('span');
+            messageTextSpan.classList.add('message-text');
+            messageTextSpan.textContent = text;
+
+            if (sender === 'user') {
+                messageDiv.classList.add('self-end', 'bg-blue-600', 'text-white', 'rounded-br-sm', 'flex-row-reverse');
+                iconSpan.textContent = '👤';
+                iconSpan.classList.add('ml-2', 'mr-0');
+            } else {
+                messageDiv.classList.add('self-start', 'bg-gray-200', 'text-gray-800', 'rounded-bl-sm');
+                iconSpan.textContent = '🤖';
+            }
+
+            messageDiv.appendChild(iconSpan);
+            messageDiv.appendChild(messageTextSpan);
+            chatMessages.appendChild(messageDiv);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+            return messageTextSpan; // Ritorna l'elemento del testo per lo streaming
+        }
+
+        // Funzione per inviare il messaggio al backend
+        async function sendMessage() {
+            const message = userInput.value.trim();
+            if (message === '') {
+                return;
+            }
+
+            addMessage(message, 'user');
+            userInput.value = '';
+
+            const thinkingMessage = document.createElement('div');
+            thinkingMessage.classList.add('thinking', 'text-center', 'py-2', 'italic', 'text-gray-500');
+            
+            const thinkingIconSpan = document.createElement('span');
+            thinkingIconSpan.classList.add('icon', 'mr-1', 'text-xl');
+            thinkingIconSpan.textContent = '🤖';
+
+            const thinkingTextSpan = document.createElement('span');
+            thinkingTextSpan.textContent = 'Pensando';
+
+            thinkingMessage.appendChild(thinkingIconSpan);
+            thinkingMessage.appendChild(thinkingTextSpan);
+            
+            chatMessages.appendChild(thinkingMessage);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+
+            let dots = 0;
+            thinkingInterval = setInterval(() => {
+                dots = (dots + 1) % 4;
+                thinkingTextSpan.textContent = 'Pensando' + '.'.repeat(dots);
+            }, 500);
+
+            try {
+                // Inizializza il messaggio del bot che verrà aggiornato
+                // currentBotMessageElement = addMessage('', 'bot'); // Non creare ancora il messaggio, lo faremo al primo chunk
+
+                const response = await fetch('http://localhost:3000/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ message: message, conversation: conversation })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                // Utilizza un ReadableStream default per leggere i dati in streaming
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let receivedChunks = '';
+                let isFirstChunk = true; // Flag per creare il messaggio del bot solo al primo chunk
+
+                // Rimuovi il messaggio "Pensando..." appena inizia lo streaming
+                clearInterval(thinkingInterval);
+                if (chatMessages.contains(thinkingMessage)) {
+                    chatMessages.removeChild(thinkingMessage);
+                }
+                
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+
+                    receivedChunks += decoder.decode(value, { stream: true });
+                    const lines = receivedChunks.split('\n\n');
+
+                    receivedChunks = lines.pop(); // Mantieni l'ultimo chunk incompleto
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.substring(6));
+                                if (data.type === 'chunk') {
+                                    if (isFirstChunk) {
+                                        currentBotMessageElement = addMessage('', 'bot'); // Crea il messaggio al primo chunk
+                                        isFirstChunk = false;
+                                    }
+                                    currentBotMessageElement.textContent += data.content;
+                                    chatMessages.scrollTop = chatMessages.scrollHeight; // Scorri in basso
+                                } else if (data.type === 'end') {
+                                    conversation = data.conversation; // Aggiorna la conversazione finale
+                                } else if (data.type === 'error') {
+                                    if (isFirstChunk) { // Se l'errore arriva prima di qualsiasi chunk
+                                        addMessage(data.error, 'bot');
+                                    } else { // Se l'errore arriva dopo aver iniziato a scrivere
+                                        currentBotMessageElement.textContent += `\n\nErrore: ${data.error}`;
+                                    }
+                                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                                }
+                            } catch (e) {
+                                console.error('Errore nel parsing del JSON stream:', e, 'Linea:', line);
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                console.error('Errore durante la richiesta API:', error);
+                // In caso di errore di rete o di risposta HTTP non OK
+                clearInterval(thinkingInterval);
+                if (chatMessages.contains(thinkingMessage)) {
+                    chatMessages.removeChild(thinkingMessage);
+                }
+                addMessage('Errore di connessione o del server.', 'bot');
+            }
+        }
+
+        // Event listener per il pulsante "Invia"
+        sendButton.addEventListener('click', sendMessage);
+
+        // Event listener per il tasto "Invio" nell'input
+        userInput.addEventListener('keypress', (event) => {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        });
+    </script>
+</body>
+</html>
